@@ -12,6 +12,9 @@ import measurement.tinkerer.com.measureheight.util.Keys.LABEL_PATH
 import measurement.tinkerer.com.measureheight.util.Keys.MAX_RESULTS
 import measurement.tinkerer.com.measureheight.util.Keys.MODEL_PATH
 import io.reactivex.Single
+import measurement.tinkerer.com.measureheight.util.Keys.IMAGE_MEAN
+import measurement.tinkerer.com.measureheight.util.Keys.IMAGE_STD
+import measurement.tinkerer.com.measureheight.util.Keys.NUM_CHANNELS
 import org.tensorflow.lite.Interpreter
 import java.io.BufferedReader
 import java.io.FileInputStream
@@ -27,6 +30,17 @@ class ImageClassifier constructor(private val assetManager: AssetManager) {
 
     private var interpreter: Interpreter? = null
     private var labelProb: Array<ByteArray>
+    private val labelProbArray: Array<Array<FloatArray>>
+
+    // Modify to accept 4 output tensors
+    private var outputLocations: FloatArray? = null
+    private var outputScores: FloatArray? = null
+    private var outputClasses: FloatArray? = null
+    private var outputNumDetections: FloatArray? = null
+    private var outputNames: Array<String>? = null
+
+    private var logStats = false
+
     private val labels = Vector<String>()
     private val intValues by lazy { IntArray(INPUT_SIZE * INPUT_SIZE) }
     private var imgData: ByteBuffer
@@ -42,8 +56,9 @@ class ImageClassifier constructor(private val assetManager: AssetManager) {
         } catch (e: IOException) {
             throw RuntimeException("Problem reading label file!", e)
         }
+        labelProbArray = Array( 1){ Array(1917) { FloatArray(4) }}
         labelProb = Array(1) { ByteArray(labels.size) }
-        imgData = ByteBuffer.allocateDirect(DIM_BATCH_SIZE * DIM_IMG_SIZE_X * DIM_IMG_SIZE_Y * DIM_PIXEL_SIZE)
+        imgData = ByteBuffer.allocateDirect(DIM_BATCH_SIZE * DIM_IMG_SIZE_X * DIM_IMG_SIZE_Y * DIM_PIXEL_SIZE * NUM_CHANNELS)
         imgData.order(ByteOrder.nativeOrder())
         try {
             interpreter = Interpreter(loadModelFile(assetManager, MODEL_PATH))
@@ -59,10 +74,10 @@ class ImageClassifier constructor(private val assetManager: AssetManager) {
         var pixel = 0
         for (i in 0 until DIM_IMG_SIZE_X) {
             for (j in 0 until DIM_IMG_SIZE_Y) {
-                val value = intValues[pixel++]
-                imgData.put((value shr 16 and 0xFF).toByte())
-                imgData.put((value shr 8 and 0xFF).toByte())
-                imgData.put((value and 0xFF).toByte())
+                val value = intValues!![pixel++]
+                imgData!!.putFloat(((value shr 16 and 0xFF) - IMAGE_MEAN) / IMAGE_STD)
+                imgData!!.putFloat(((value shr 8 and 0xFF) - IMAGE_MEAN) / IMAGE_STD)
+                imgData!!.putFloat(((value and 0xFF) - IMAGE_MEAN) / IMAGE_STD)
             }
         }
     }
@@ -79,14 +94,15 @@ class ImageClassifier constructor(private val assetManager: AssetManager) {
     fun recognizeImage(bitmap: Bitmap): Single<List<Result>> {
         return Single.just(bitmap).flatMap {
             convertBitmapToByteBuffer(it)
-            interpreter!!.run(imgData, labelProb)
+            interpreter!!.run(imgData, labelProbArray)
             val pq = PriorityQueue<Result>(3,
                 Comparator<Result> { lhs, rhs ->
                     // Intentionally reversed to put high confidence at the head of the queue.
                     java.lang.Float.compare(rhs.confidence!!, lhs.confidence!!)
                 })
             for (i in labels.indices) {
-                pq.add(Result("" + i, if (labels.size > i) labels[i] else "unknown", labelProb[0][i].toFloat(), null))
+
+                pq.add(Result("" + i, if (labels.size > i) labels[i] else "unknown", labelProbArray[0][i][2], null))
             }
             val recognitions = ArrayList<Result>()
             val recognitionsSize = Math.min(pq.size, MAX_RESULTS)
